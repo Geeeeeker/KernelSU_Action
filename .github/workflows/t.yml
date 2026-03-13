@@ -233,9 +233,9 @@ jobs:
             echo "CONFIG_MODULES=y" >> arch/${{ env.ARCH }}/configs/${{ env.KERNEL_CONFIG }}
         fi
     - name: 配置 LXC 和 Docker 支持
-      working-directory: kernel_workspace/android-kernel   # 修正工作目录
+      working-directory: kernel_workspace/android-kernel
       run: |
-        DEFCONFIG="arch/${ARCH}/configs/${KERNEL_CONFIG}"   # 使用环境变量
+        DEFCONFIG="arch/${ARCH}/configs/${KERNEL_CONFIG}"
         rm -rf utils
         git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
         # 移除 LXC 补丁中强制选中的越权语句
@@ -328,25 +328,113 @@ jobs:
           echo "Warning: $MODULE_DIR not found. USB/IP may not have been built."
         fi
 
-    # === NEW: Build usbip userspace tools ===
-    - name: Install dependencies for usbip userspace tools
+    # === NEW: Build usbip userspace tools in arm64 container (replaces old cross-compile steps) ===
+    - name: Set up QEMU for arm64 emulation
       if: env.CHECK_FILE_IS_OK == 'true'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libusb-1.0-0-dev libglib2.0-dev autoconf automake libtool
+        sudo apt-get install -y qemu-user-static binfmt-support
+        docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
-    - name: Build usbip userspace tools
+    - name: Build usbip userspace tools in arm64 container
       if: env.CHECK_FILE_IS_OK == 'true'
       run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/tools/usb/usbip
-        if [ -f "./autogen.sh" ]; then
-          ./autogen.sh
-        fi
-        ./configure --prefix=/usr
-        make -j$(nproc)
-        mkdir -p $GITHUB_WORKSPACE/usbip-userspace
-        make install DESTDIR=$GITHUB_WORKSPACE/usbip-userspace
-        echo "usbip userspace tools built and installed to $GITHUB_WORKSPACE/usbip-userspace"
+        # 创建输出目录，保持与原工作流兼容的结构：usbip-userspace/usr/{bin,lib}
+        mkdir -p ${{ github.workspace }}/usbip-userspace/usr/{bin,lib}
+        
+        docker run --rm --platform linux/arm64 \
+          -v ${{ github.workspace }}/kernel_workspace/android-kernel:/kernel \
+          -v ${{ github.workspace }}/usbip-userspace:/output \
+          -w /kernel/tools/usb/usbip \
+          arm64v8/ubuntu:22.04 \
+          bash -c "
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            
+            # 安装编译依赖（包含 libudev-dev:arm64 解决原错误）
+            apt update
+            apt install -y \
+              build-essential \
+              autoconf \
+              libtool \
+              pkg-config \
+              libudev-dev:arm64 \
+              libssl-dev:arm64 \
+              flex \
+              bison \
+              libncurses-dev \
+              wget \
+              kmod \
+              patchelf \
+              file \
+              bc \
+              libelf-dev \
+              binutils-aarch64-linux-gnu
+            
+            # 生成配置（若无 autogen.sh 则用 autoreconf）
+            if [ -f ./autogen.sh ]; then
+              ./autogen.sh
+            else
+              autoreconf -i
+            fi
+            
+            # 配置（关闭 tcp-wrappers，忽略部分警告）
+            ./configure \
+              CFLAGS=\"-Wno-error -Wno-error=stringop-truncation\" \
+              --with-tcp-wrappers=no
+            
+            # 编译
+            make -j\$(nproc)
+            
+            # 复制编译产物到输出目录（按原结构 usr/bin, usr/lib）
+            mkdir -p /output/usr/bin /output/usr/lib
+            cp src/.libs/usbip /output/usr/bin/
+            cp src/.libs/usbipd /output/usr/bin/
+            cp libsrc/.libs/libusbip.so.0* /output/usr/lib/
+            
+            # 收集动态库依赖
+            cd /output
+            BINARIES=\"usr/bin/usbip usr/bin/usbipd usr/lib/libusbip.so.0*\"
+            DEPS=\"\"
+            for file in \$BINARIES; do
+              if [ -f \"\$file\" ]; then
+                echo \"Collecting dependencies for \$file...\"
+                needed=\$(aarch64-linux-gnu-readelf -d \"\$file\" | grep NEEDED | awk '{print \$5}' | tr -d '[]' || true)
+                for lib in \$needed; do
+                  if [[ \"\$DEPS\" != *\"\$lib\"* ]]; then
+                    DEPS=\"\$DEPS \$lib\"
+                  fi
+                done
+              fi
+            done
+            
+            # 去重并复制库文件
+            for lib in \$(echo \$DEPS | tr ' ' '\\n' | sort -u); do
+              echo \"Searching for library: \$lib\"
+              libpath=\$(ldconfig -p | grep \"\$lib (\" | head -1 | awk '{print \$NF}' || true)
+              if [ -z \"\$libpath\" ]; then
+                libpath=\$(find /lib /usr/lib -name \"\$lib\" -type f 2>/dev/null | head -1 || true)
+              fi
+              if [ -n \"\$libpath\" ]; then
+                echo \"Found: \$libpath\"
+                cp -P \"\$libpath\" usr/lib/ 2>/dev/null || cp \"\$libpath\" usr/lib/
+                # 复制可能的符号链接指向的实际文件
+                for reallib in \$(find \"\$(dirname \"\$libpath\")\" -name \"\${lib%.so*}*\" -type f 2>/dev/null); do
+                  cp -n \"\$reallib\" usr/lib/ 2>/dev/null || true
+                done
+              else
+                echo \"Warning: library \$lib not found\"
+              fi
+            done
+            
+            # 确保 ld-linux 被复制
+            ld_linux=\"/lib/ld-linux-aarch64.so.1\"
+            if [ -f \"\$ld_linux\" ]; then
+              cp -P \"\$ld_linux\" usr/lib/
+            fi
+            
+            echo \"Build and collection complete.\"
+          "
 
     # === NEW: Combine USB/IP modules and userspace tools into one package ===
     - name: Package USB/IP full (modules + userspace)
