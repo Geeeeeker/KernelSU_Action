@@ -1,4 +1,4 @@
-name: Build Kernel
+name: Build Kernel（添加配置 LXC 和 Docker字段）
 on:
   workflow_dispatch:
 
