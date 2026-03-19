@@ -1,4 +1,4 @@
-name: Build Kernel
+name: Build Kernel（编译动态usbip）
 on:
   workflow_dispatch:
 
