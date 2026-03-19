@@ -1,4 +1,4 @@
-name: Build Kernel
+name: Build Kernel(仅usbip-modules)
 on:
   workflow_dispatch:
 
