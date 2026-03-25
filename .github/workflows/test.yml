@@ -96,9 +96,9 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
         mkdir clang-aosp
-        # 使用指定的 AOSP 分支 android16 和版本 r547379
-        wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android16/clang-r547379.tar.gz
+        wget -O clang-r547379.tar.gz https://github.com/Geeeeeker/boot/releases/download/clang-prebuilts-20260319-031015/clang-r547379.tar.gz
         tar -C clang-aosp/ -zxvf clang-r547379.tar.gz
+        rm clang-r547379.tar.gz
 
     - name: Download Custom-Clang
       if: env.USE_CUSTOM_CLANG == 'true'
